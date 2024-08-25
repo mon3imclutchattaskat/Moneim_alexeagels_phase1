@@ -2,108 +2,143 @@ import cv2
 import numpy as np
 import os
 
-def calculate_diameter(contour):
-    """Calculate the diameter of the gear based on its contour."""
-    (x, y), radius = cv2.minEnclosingCircle(contour)
-    return 2 * radius
+# Function defined to find the centre of any contour then return its x and y coordinates as a tuple
+def findCentre(contour):
+    M = cv2.moments(contour)
+    area = M['m00']
+    cx = int(M['m10'] / M['m00'])
+    cy = int(M['m01'] / M['m00'])
+    return (cx, cy)
 
-def detect_inner_opening(contour):
-    """Detect and calculate the area of the inner opening of the gear."""
-    (x, y), radius = cv2.minEnclosingCircle(contour)
-    return np.pi * (radius ** 2)
+# Define paths
+samples_folder = "samples/"
+extracted_samples_folder = "extracted_samples/"
+os.makedirs(extracted_samples_folder, exist_ok=True)
+ideal_image_path = os.path.join(samples_folder, "ideal.jpg")
 
-def align_images(ideal_image, sample_image):
-    """Align the sample image to the ideal image using geometric transformations."""
-    orb = cv2.ORB_create()
-    kp1, des1 = orb.detectAndCompute(ideal_image, None)
-    kp2, des2 = orb.detectAndCompute(sample_image, None)
+# Read the ideal image
+ideal_image = cv2.imread(ideal_image_path)
+ideal = cv2.cvtColor(ideal_image, cv2.COLOR_BGR2GRAY)
+
+# Create thresholded binary mask of the ideal image
+ret, ideal_threshold = cv2.threshold(ideal, 30, 255, cv2.THRESH_BINARY)
+
+# Ideal diameter radius in pixels (assumed from comments)
+ideal_radius = 25
+ideal_area = np.pi * ideal_radius ** 2
+
+def diameter_status(area):
+    """Determine if the sample's inner diameter is larger, smaller, or the same compared to the ideal."""
+    tolerance = 0.05  # 5% tolerance
+    lower_limit = ideal_area * (1 - tolerance)
+    upper_limit = ideal_area * (1 + tolerance)
     
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    
-    if len(matches) >= 4:
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-        matrix, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-        aligned_image = cv2.warpPerspective(sample_image, matrix, (ideal_image.shape[1], ideal_image.shape[0]))
-        return aligned_image
+    if area < lower_limit:
+        return "Smaller"
+    elif area > upper_limit:
+        return "Larger"
     else:
-        print("Not enough matches found for alignment.")
-        return sample_image
+        return "Same"
 
-def detect_defects_and_diameter(ideal_image_path, samples_folder_path, output_folder):
-    # Load the ideal image and convert it to grayscale
-    ideal_image = cv2.imread(ideal_image_path, cv2.IMREAD_GRAYSCALE)
-    if ideal_image is None:
-        print(f"Error: Could not open or read the image '{ideal_image_path}'.")
-        return
-    
-    ideal_blur = cv2.GaussianBlur(ideal_image, (5, 5), 0)
-    ideal_edges = cv2.Canny(ideal_blur, 30, 100)
-    
-    ideal_contours, _ = cv2.findContours(ideal_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    ideal_diameter = max(calculate_diameter(contour) for contour in ideal_contours if cv2.contourArea(contour) > 1500)
-    ideal_inner_area = max(detect_inner_opening(contour) for contour in ideal_contours if cv2.contourArea(contour) > 1500)
-    
-    os.makedirs(output_folder, exist_ok=True)
-    sample_image_paths = [os.path.join(samples_folder_path, f) for f in os.listdir(samples_folder_path) if f.endswith('.jpg') or f.endswith('.png')]
-    
-    for sample_image_path in sample_image_paths:
-        sample_image = cv2.imread(sample_image_path, cv2.IMREAD_GRAYSCALE)
-        if sample_image is None:
-            print(f"Error: Could not open or read the image '{sample_image_path}'.")
-            continue
-        
-        # Align the sample image with the ideal image
-        aligned_image = align_images(ideal_image, sample_image)
-        
-        # Process the aligned image
-        sample_blur = cv2.GaussianBlur(aligned_image, (5, 5), 0)
-        sample_edges = cv2.Canny(sample_blur, 30, 100)
-        
-        sample_contours, _ = cv2.findContours(sample_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        sample_diameter = max(calculate_diameter(contour) for contour in sample_contours if cv2.contourArea(contour) > 1500)
-        sample_inner_area = max(detect_inner_opening(contour) for contour in sample_contours if cv2.contourArea(contour) > 1500)
-        
-        diff_edges = cv2.bitwise_xor(ideal_edges, sample_edges)
-        diff_contours, _ = cv2.findContours(diff_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+# Process each sample image
+for idx, sample_image_name in enumerate(["sample2.jpg", "sample3.jpg", "sample4.jpg", "sample5.jpg", "sample6.jpg"], start=2):
+    sample_image_path = os.path.join(samples_folder, sample_image_name)
+    sample = cv2.imread(sample_image_path, cv2.IMREAD_GRAYSCALE)
 
-        broken_teeth_count = 0
-        worn_teeth_count = 0
+    # Create thresholded binary mask for the sample image
+    ret, sample_threshold = cv2.threshold(sample, 30, 255, cv2.THRESH_BINARY)
 
-        for contour in diff_contours:
-            area = cv2.contourArea(contour)
-            perimeter = cv2.arcLength(contour, True)
-            aspect_ratio = 0
-            
-            x, y, w, h = cv2.boundingRect(contour)
-            if h != 0:
-                aspect_ratio = float(w) / h
-            
-            if area > 1500 and aspect_ratio < 1.5:
-                broken_teeth_count += 1
-            elif area > 0 and area < 1500 and perimeter / area > 0.1:
-                worn_teeth_count += 1
+    # Get the binary image of the ideal teeth
+    ideal_teeth = cv2.cvtColor(ideal_image, cv2.COLOR_BGR2GRAY)
+    cx, cy = findCentre(ideal_threshold)
+    cv2.circle(ideal_teeth, (cx - 6, cy), 165, (0, 0, 0), -1)
+    cv2.circle(ideal_teeth, (cx + 6, cy), 165, (0, 0, 0), -1)
+    ret, ideal_teeth_threshold = cv2.threshold(ideal_teeth, 30, 255, cv2.THRESH_BINARY)
+    ideal_teeth_erosion = cv2.erode(ideal_teeth_threshold, np.ones((3, 3), np.uint8), iterations=1)
+    contours_ideal_teeth, _ = cv2.findContours(ideal_teeth_erosion, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-        diameter_status = "identical" if abs(sample_diameter - ideal_diameter) < 10 else ("larger" if sample_diameter > ideal_diameter else "smaller")
-        inner_opening_status = "identical" if abs(sample_inner_area - ideal_inner_area) < 100 else "different"
-        
-        print(f"Results for {os.path.basename(sample_image_path)}:")
-        print(f"  Diameter Status: {diameter_status}")
-        print(f"  Inner Opening Status: {inner_opening_status}")
-        print(f"  Broken Teeth Count: {broken_teeth_count}")
-        print(f"  Worn Teeth Count: {worn_teeth_count}")
-        
-        # Save the processed images to the output folder
-        output_image_path = os.path.join(output_folder, os.path.basename(sample_image_path))
-        cv2.imwrite(output_image_path, sample_edges)
+    # Find the difference between the ideal mask and the sample mask to get faulty parts
+    difference = cv2.bitwise_xor(ideal_threshold, sample_threshold)
+    cv2.circle(difference, (cx - 6, cy), 165, (0, 0, 0), -1)
+    cv2.circle(difference, (cx + 6, cy), 165, (0, 0, 0), -1)
+    difference_erosion = cv2.erode(difference, np.ones((3, 3), np.uint8), iterations=1)
+    contours_difference, _ = cv2.findContours(difference_erosion, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-# Define paths to the ideal image and samples folder
-ideal_image_path = 'samples/ideal.jpg'
-samples_folder_path = 'samples'
-output_folder = 'extracted_samples'
+    # Draw bounding circles for each faulty tooth and match with ideal teeth
+    contours_difference_centres = []
+    for c in contours_difference:
+        cx, cy = findCentre(c)
+        cv2.circle(difference_erosion, (cx, cy), 22, (255, 255, 255), -1)
+        contours_difference_centres.append((cx, cy))
 
-# Run the defect detection and diameter comparison
-detect_defects_and_diameter(ideal_image_path, samples_folder_path, output_folder)
+    ideal_teeth_filtered = cv2.bitwise_and(difference_erosion, ideal_teeth_erosion)
+    contours_ideal_teeth_filtered, _ = cv2.findContours(ideal_teeth_filtered, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
+    contours_ideal_teeth_filtered_centres = []
+    for c in contours_ideal_teeth_filtered:
+        cx, cy = findCentre(c)
+        contours_ideal_teeth_filtered_centres.append((cx, cy))
+
+    contours_ideal_teeth_matched = []
+    count = 0
+    for i in contours_difference_centres:
+        diff_x, diff_y = i
+        for j in contours_ideal_teeth_filtered_centres:
+            ideal_x, ideal_y = j
+            centre_distance = ((ideal_x - diff_x) ** 2 + (ideal_y - diff_y) ** 2) ** 0.5
+            if centre_distance < 20:
+                contours_ideal_teeth_matched.append(contours_ideal_teeth_filtered[count])
+                break
+            count += 1
+        count = 0
+
+    worn_out_teeth = 0
+    broken_teeth = 0
+
+    for i in range(len(contours_difference)):
+        area_difference = cv2.contourArea(contours_difference[i])
+        if i < len(contours_ideal_teeth_matched):
+            area_ideal = cv2.contourArea(contours_ideal_teeth_matched[i])
+            if area_difference / area_ideal < 0.85:
+                worn_out_teeth += 1
+            else:
+                broken_teeth += 1
+
+    # Inner diameter verification
+    sample_diameter_path = os.path.join(samples_folder, sample_image_name)
+    sample_image = cv2.imread(sample_diameter_path, cv2.IMREAD_GRAYSCALE)
+    ideal_diameter = cv2.cvtColor(ideal_image, cv2.COLOR_BGR2GRAY)
+    ret, ideal_diameter_threshold = cv2.threshold(ideal_diameter, 30, 255, cv2.THRESH_BINARY_INV)
+    ret, sample_threshold = cv2.threshold(sample_image, 30, 255, cv2.THRESH_BINARY_INV)
+    cv2.circle(ideal_diameter_threshold, (cx, cy), 300, (0, 0, 0), 500)
+    cv2.circle(sample_threshold, (cx, cy), 300, (0, 0, 0), 500)
+    contours_ideal_diameter, _ = cv2.findContours(ideal_diameter_threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours_sample, _ = cv2.findContours(sample_threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    diameter_status_text = ""
+    if len(contours_sample) > 0:
+        sample_area = cv2.contourArea(contours_sample[0])
+        sample_radius = np.sqrt(sample_area / np.pi)
+        sample_diameter = 2 * sample_radius
+        status = diameter_status(sample_area)
+        diameter_status_text = f"{sample_diameter:.2f} mm - {status} inner opening"
+    else:
+        diameter_status_text = "No inner diameter detected"
+
+    # Generate description for the current sample
+    description_parts = []
+    if len(contours_difference) > 0:
+        if broken_teeth > 0:
+            description_parts.append(f"Broken teeth: {broken_teeth}")
+        if worn_out_teeth > 0:
+            description_parts.append(f"Worn out teeth: {worn_out_teeth}")
+
+    description_parts.append(diameter_status_text)
+    description = " + ".join(description_parts) if description_parts else "No defects detected"
+
+    # Print results
+    print(f"Sample {idx}: {description}")
+
+    # Save the images
+    result_image_path = os.path.join(extracted_samples_folder, f"defect_localization_{sample_image_name}")
+    cv2.imwrite(result_image_path, difference_erosion)
